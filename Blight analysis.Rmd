@@ -50,7 +50,9 @@ parse_addr <- function(df, col){
   mutate(lat=as.numeric(lat), lng=as.numeric(lng)) %>%
   mutate(addr = sub("\n.+", "", addr))
 }
-b 
+
+adr_loc <- bind_rows(parse_addr(violations, "ViolationAddress"),
+                     parse_addr(violations, "MailingAddress"))
 
 adr_loc %<>% filter(lat < max(boundary$lat),
                     lat > min(boundary$lat),
