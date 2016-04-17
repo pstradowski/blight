@@ -1,0 +1,99 @@
+---
+title: "Blight analysis"
+author: "Paweł Stradowski"
+date: "31.03.2016"
+output: html_document
+---
+```{r}
+Sys.setlocale("LC_MESSAGES", "en_US.utf8")
+Sys.setlocale("LC_ALL", "en_US.utf8")
+#data_path <- '~/datasci_course_materials/capstone/blight/data/'
+data_path <- '/home/pawel/Documents/datasci_course_materials/capstone/blight/data/'
+detroit.311 <- read.csv(paste0(data_path, "detroit-311.csv"))
+violations <- read.csv(paste0(data_path, "detroit-blight-violations.csv"))
+crime <- read.csv(paste0(data_path, "detroit-crime.csv"))
+demolitions <- read.delim(paste0(data_path, "detroit-demolition-permits.tsv"))
+load(file="boundary.RData")
+library("dplyr")
+library("leaflet")
+library("tidyr")
+library("magrittr")
+library("geosphere")
+```
+Initial explorations
+```{r}
+detroit.311 %>% group_by(issue_type) %>% summarize(occurences=n()) %>% arrange(-occurences) %>% print(n=30)
+crime %>% group_by(ADDRESS) %>% summarize(occurences=n()) %>% arrange(-occurences)
+```
+More interesting is spatial distributrion, here comes one Leaflet map:
+```{r}
+leaflet(data=detroit.311) %>% addTiles() %>% 
+  addMarkers(~lng, ~lat, 
+             popup=~issue_description,
+             clusterOptions = markerClusterOptions())
+leaflet(data=crime) %>% addTiles() %>% 
+  addMarkers(~LON, ~LAT,
+             clusterOptions = markerClusterOptions())
+
+```
+Addresses extraction from violations
+``` {r}
+
+parse_addr <- function(df, col){
+  df %>% 
+    select_(col) %>%
+    separate_(col, into=c("addr", "loc"), sep="\\(") %>%
+    extract(loc, into = c("lat", "lng"), 
+          regex = "(\\d+\\.\\d+),\\s(\\-*\\d+\\.\\d+)", perl = TRUE) %>%
+    filter(addr !="") %>% 
+  select(addr, lat, lng) %>% 
+  mutate(lat=as.numeric(lat), lng=as.numeric(lng)) %>%
+  mutate(addr = sub("\n.+", "", addr))
+}
+b 
+
+adr_loc %<>% filter(lat < max(boundary$lat),
+                    lat > min(boundary$lat),
+                    lng < max(boundary$lon),
+                    lng > min(boundary$lon))
+adr_loc %>% 
+  select(addr) %>% 
+  distinct() %>% 
+  sample_n(20000) %>% 
+  inner_join(adr_loc) %>%
+  leaflet() %>% addTiles() %>% 
+  addMarkers(~lng, ~lat, 
+             popup = ~addr,
+             clusterOptions = markerClusterOptions()) 
+ 
+```
+Week 3 analysis
+```{r}
+demolitions %>% 
+  group_by(SITE_ADDRESS)  %>%
+  summarise(cnt = n()) %>%
+  arrange(-cnt) %>%
+  nrow()
+
+demolitions %>% 
+  group_by(BLD_PERMIT_TYPE) %>% 
+  summarise(cnt = n()) %>% 
+  arrange(-cnt)
+
+labels <- demolitions %>% 
+  select(SITE_ADDRESS, BLD_PERMIT_TYPE) %>%
+   distinct(SITE_ADDRESS) %>%
+   right_join(adr_loc %>% distinct(addr), by = c("SITE_ADDRESS" = "addr")) %>%
+  mutate(blighted = !is.na(BLD_PERMIT_TYPE)) %>% 
+  select(-BLD_PERMIT_TYPE)
+
+n_blighted= labels %>% 
+  filter(blighted == TRUE) %>%
+  nrow()
+data_set <- labels %>%
+  filter(blighted == FALSE) %>%
+  sample_n(n_blighted, replace = FALSE) %>%
+  bind_rows(labels %>% filter(blighted == TRUE)) 
+
+  
+```
