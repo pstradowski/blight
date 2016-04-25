@@ -18,81 +18,75 @@ library("dplyr")
 library("leaflet")
 library("tidyr")
 library("fuzzyjoin")
+library("magrittr")
+library("geohash")
 ```
-Initial explorations
-```{r}
-detroit.311 %>% group_by(issue_type) %>% summarize(occurences=n()) %>% arrange(-occurences) %>% print(n=30)
-crime %>% group_by(ADDRESS) %>% summarize(occurences=n()) %>% arrange(-occurences)
-```
-More interesting is spatial distributrion, here comes one Leaflet map:
-```{r}
-leaflet(data=detroit.311) %>% addTiles() %>% 
-  addMarkers(~lng, ~lat, 
-             popup=~issue_description,
-             clusterOptions = markerClusterOptions())
-leaflet(data=crime) %>% addTiles() %>% 
-  addMarkers(~LON, ~LAT,
-             clusterOptions = markerClusterOptions())
 
-```
 Addresses extraction from violations
 ``` {r}
 
 parse_addr <- function(df, col){
   df %>% 
-    select_(col) %>%
     separate_(col, into=c("addr", "loc"), sep="\\(") %>%
-    extract(loc, into = c("lat", "lng"), 
+    tidyr::extract(loc, into = c("lat", "lon"), 
           regex = "(\\d+\\.\\d+),\\s(\\-*\\d+\\.\\d+)", perl = TRUE) %>%
-    filter(addr !="") %>% 
-  select(addr, lat, lng) %>% 
-  mutate(lat=as.numeric(lat), lng=as.numeric(lng)) %>%
-  mutate(addr = sub("\n.+", "", addr))
-}
-adr_loc <- bind_rows(parse_addr(violations, "ViolationAddress"),
-                     parse_addr(violations, "MailingAddress"))
+  mutate(lat=as.numeric(lat), lon=as.numeric(lon)) %>%
+  mutate(addr = sub("\n.+", "", addr)) 
+ }
 
-crime %>% select(CATEGORY) %>% 
-  group_by(CATEGORY) %>% 
-  summarize(cnt=n()) %>% 
-  arrange(cnt) %>% View()
-adr_loc <- crime %>% #slice(1:10) %>%
-  filter(CATEGORY == "BURGLARY") %>%
-  select(ADDRESS, LAT, LON) %>%
-  rename(addr = ADDRESS, lat = LAT, lng = LON) %>%
-  bind_rows(adr_loc)
-
-adr_loc %<>% filter(lat<max(boundary$lat), 
+enrich <- function(df) {
+  df %>% filter(lat<max(boundary$lat), 
                     lat > min(boundary$lat), 
-                    lng > min(boundary$lon), 
-                    lng < max(boundary$lon))
+                    lon > min(boundary$lon), 
+                    lon < max(boundary$lon)) %>%
+    mutate(geohash = gh_encode(lat, lon, 8)) %>%
+    mutate(gh6 = substr(geohash, 1, 6),
+         gh7 = substr(geohash, 1, 7))
+}
 
-adr_loc %>% slice(1:10000) %>%
-  leaflet() %>% addTiles() %>% 
-  addMarkers(~lng, ~lat, clusterOptions = markerClusterOptions())
- 
+violations %<>% parse_addr("ViolationAddress") %>% 
+  enrich() 
+  
+crime %<>% rename(lat = LAT, lon = LON, addr = ADDRESS) %>% 
+  enrich() 
+  
+demolitions %<>% parse_addr("site_location") %>% 
+  enrich() 
+
+detroit.311 %<>% rename(lon = lng) %>%
+  enrich()
+  
 ```
 
 ```{r}
-demol <-parse_addr(demolitions, "site_location") %>% 
-  distinct(addr) %>%
-  mutate(blighted = TRUE)
+blight <-demolitions %>% distinct(geohash) %>%
+  select(geohash, gh6, gh7) %>%
+  mutate(blighted = 1) 
 
-non_blighted <- adr_loc %>%
-  distinct(addr) %>%
-  anti_join(demol, by = "addr") %>%
-  mutate(blighted = FALSE)
 
-data_set <- non_blighted %>%
-  sample_n(nrow(demol), replace = FALSE) %>% 
-  bind_rows(demol)
+all_events <- crime %>% select(geohash, gh6, gh7) %>%
+  bind_rows(violations %>% select(geohash, gh6, gh7)) %>%
+  distinct(geohash) 
 
-data_set <- violations %>% 
-  parse_addr("ViolationAddress") %>% 
-  inner_join(data_set, by="addr") %>% 
-  group_by(addr) %>% summarise(cnt = n()) %>% 
-  right_join(data_set, by="addr") %>% 
+non_blight <- anti_join(all_events, blight, by="gh7") %>%
+  select(geohash, gh6, gh7) %>%
+  mutate(blighted = 0)
+
+data_set <- non_blight %>%
+  sample_n(nrow(blight), replace = FALSE) %>% 
+  bind_rows(blight)
+
+ds <- violations  %>% select(geohash) %>%
+  right_join(data_set, by="geohash") %>% 
+  group_by(geohash) %>% summarise(cnt = n()) %>%  
+  right_join(data_set, by="geohash") %>% 
   mutate(feat1 = ifelse(is.na(cnt), 0, cnt)) %>% 
-  select(blighted, feat1)
+  select(blighted, feat1) %>%
+  mutate(blighted = factor(blighted))
+
+inTraining <- createDataPartition(data_set$blighted, p=.75, list = FALSE)
+tr <-data_set[inTraining,]
+ts <- data_set[-inTraining,]
+
 
 ```
