@@ -13,12 +13,11 @@ detroit.311 <- read.csv(paste0(data_path, "detroit-311.csv"))
 violations <- read.csv(paste0(data_path, "detroit-blight-violations.csv"))
 crime <- read.csv(paste0(data_path, "detroit-crime.csv"))
 demolitions <- read.delim(paste0(data_path, "detroit-demolition-permits.tsv"))
-load(file="boundary.RData")
+load("boundary.RData")
 library("dplyr")
 library("leaflet")
 library("tidyr")
-library("magrittr")
-library("geosphere")
+library("fuzzyjoin")
 ```
 Initial explorations
 ```{r}
@@ -50,52 +49,50 @@ parse_addr <- function(df, col){
   mutate(lat=as.numeric(lat), lng=as.numeric(lng)) %>%
   mutate(addr = sub("\n.+", "", addr))
 }
-
 adr_loc <- bind_rows(parse_addr(violations, "ViolationAddress"),
                      parse_addr(violations, "MailingAddress"))
 
-adr_loc %<>% filter(lat < max(boundary$lat),
-                    lat > min(boundary$lat),
-                    lng < max(boundary$lon),
-                    lng > min(boundary$lon))
-adr_loc %>% 
-  select(addr) %>% 
-  distinct() %>% 
-  sample_n(20000) %>% 
-  inner_join(adr_loc) %>%
+crime %>% select(CATEGORY) %>% 
+  group_by(CATEGORY) %>% 
+  summarize(cnt=n()) %>% 
+  arrange(cnt) %>% View()
+adr_loc <- crime %>% #slice(1:10) %>%
+  filter(CATEGORY == "BURGLARY") %>%
+  select(ADDRESS, LAT, LON) %>%
+  rename(addr = ADDRESS, lat = LAT, lng = LON) %>%
+  bind_rows(adr_loc)
+
+adr_loc %<>% filter(lat<max(boundary$lat), 
+                    lat > min(boundary$lat), 
+                    lng > min(boundary$lon), 
+                    lng < max(boundary$lon))
+
+adr_loc %>% slice(1:10000) %>%
   leaflet() %>% addTiles() %>% 
-  addMarkers(~lng, ~lat, 
-             popup = ~addr,
-             clusterOptions = markerClusterOptions()) 
+  addMarkers(~lng, ~lat, clusterOptions = markerClusterOptions())
  
 ```
-Week 3 analysis
+
 ```{r}
-demolitions %>% 
-  group_by(SITE_ADDRESS)  %>%
-  summarise(cnt = n()) %>%
-  arrange(-cnt) %>%
-  nrow()
+demol <-parse_addr(demolitions, "site_location") %>% 
+  distinct(addr) %>%
+  mutate(blighted = TRUE)
 
-demolitions %>% 
-  group_by(BLD_PERMIT_TYPE) %>% 
-  summarise(cnt = n()) %>% 
-  arrange(-cnt)
+non_blighted <- adr_loc %>%
+  distinct(addr) %>%
+  anti_join(demol, by = "addr") %>%
+  mutate(blighted = FALSE)
 
-labels <- demolitions %>% 
-  select(SITE_ADDRESS, BLD_PERMIT_TYPE) %>%
-   distinct(SITE_ADDRESS) %>%
-   right_join(adr_loc %>% distinct(addr), by = c("SITE_ADDRESS" = "addr")) %>%
-  mutate(blighted = !is.na(BLD_PERMIT_TYPE)) %>% 
-  select(-BLD_PERMIT_TYPE)
+data_set <- non_blighted %>%
+  sample_n(nrow(demol), replace = FALSE) %>% 
+  bind_rows(demol)
 
-n_blighted= labels %>% 
-  filter(blighted == TRUE) %>%
-  nrow()
-data_set <- labels %>%
-  filter(blighted == FALSE) %>%
-  sample_n(n_blighted, replace = FALSE) %>%
-  bind_rows(labels %>% filter(blighted == TRUE)) 
+data_set <- violations %>% 
+  parse_addr("ViolationAddress") %>% 
+  inner_join(data_set, by="addr") %>% 
+  group_by(addr) %>% summarise(cnt = n()) %>% 
+  right_join(data_set, by="addr") %>% 
+  mutate(feat1 = ifelse(is.na(cnt), 0, cnt)) %>% 
+  select(blighted, feat1)
 
-  
 ```
