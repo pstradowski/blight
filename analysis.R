@@ -1,10 +1,3 @@
----
-title: "Blight analysis"
-author: "Paweł Stradowski"
-date: "31.03.2016"
-output: html_document
----
-```{r}
 Sys.setlocale("LC_MESSAGES", "en_US.utf8")
 Sys.setlocale("LC_ALL", "en_US.utf8")
 #data_path <- '~/datasci_course_materials/capstone/blight/data/'
@@ -20,45 +13,37 @@ library("tidyr")
 library("fuzzyjoin")
 library("magrittr")
 library("geohash")
-```
-
-Addresses extraction from violations
-``` {r}
 
 parse_addr <- function(df, col){
   df %>% 
     separate_(col, into=c("addr", "loc"), sep="\\(") %>%
     tidyr::extract(loc, into = c("lat", "lon"), 
-          regex = "(\\d+\\.\\d+),\\s(\\-*\\d+\\.\\d+)", perl = TRUE) %>%
-  mutate(lat=as.numeric(lat), lon=as.numeric(lon)) %>%
-  mutate(addr = sub("\n.+", "", addr)) 
- }
+                   regex = "(\\d+\\.\\d+),\\s(\\-*\\d+\\.\\d+)", perl = TRUE) %>%
+    mutate(lat=as.numeric(lat), lon=as.numeric(lon)) %>%
+    mutate(addr = sub("\n.+", "", addr)) 
+}
 
 enrich <- function(df) {
   df %>% filter(lat<max(boundary$lat), 
-                    lat > min(boundary$lat), 
-                    lon > min(boundary$lon), 
-                    lon < max(boundary$lon)) %>%
+                lat > min(boundary$lat), 
+                lon > min(boundary$lon), 
+                lon < max(boundary$lon)) %>%
     mutate(geohash = gh_encode(lat, lon, 8)) %>%
     mutate(gh6 = substr(geohash, 1, 6),
-         gh7 = substr(geohash, 1, 7))
+           gh7 = substr(geohash, 1, 7))
 }
 
 violations %<>% parse_addr("ViolationAddress") %>% 
   enrich() 
-  
+
 crime %<>% rename(lat = LAT, lon = LON, addr = ADDRESS) %>% 
   enrich() 
-  
+
 demolitions %<>% parse_addr("site_location") %>% 
   enrich() 
 
 detroit.311 %<>% rename(lon = lng) %>%
   enrich()
-  
-```
-
-```{r}
 blight <-demolitions %>% distinct(geohash) %>%
   select(geohash, gh6, gh7, lat, lon) %>%
   mutate(blighted = 1) 
@@ -76,42 +61,18 @@ data_set <- non_blight %>%
   sample_n(nrow(blight), replace = FALSE) %>% 
   bind_rows(blight)
 
-haversine <- function(lat1, lng1, lat2, lng2, miles=FALSE){
-  AVG_EARTH_RADIUS = 6371
-  lat1=as_radians(lat1)
-  lat2=as_radians(lat2)
-  lng1=as_radians(lng1)
-  lng2=as_radians(lng2)
-  
-  lat = lat2 - lat1
-  lng = lng2 - lng1
-  d = sin(lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(lng / 2) ** 2
-  h = 2 * AVG_EARTH_RADIUS * asin(sqrt(d))
-  if(miles==TRUE) return (h * 0.621371)
-  if(miles==FALSE) return (h)
+# Calculates the geodesic distance between two points specified by radian latitude/longitude using the
+# Haversine formula (hf)
+gcd.hf <- function(long1, lat1, long2, lat2) {
+  R <- 6371 # Earth mean radius [km]
+  delta.long <- (long2 - long1)
+  delta.lat <- (lat2 - lat1)
+  a <- sin(delta.lat/2)^2 + cos(lat1) * cos(lat2) * sin(delta.long/2)^2
+  c <- 2 * asin(min(1,sqrt(a)))
+  d = R * c
+  return(d) # Distance in km
 }
 
-
-feat_viol <- violations  %>% select(geohash, gh6, gh7, lat, lon, ViolationCode) %>%
+feat1 <- violations  %>% select(geohash, gh6, gh7, lat, lon) %>%
   inner_join(data_set, by="gh7") %>%
-  mutate(dist = haversine(lat.x, lon.x, lat.y, lon.y)) %>%
-  filter(dist < 0.1) %>%
-  group_by(geohash.y, ViolationCode) %>% 
-  summarise(cnt = n()) %>%
-  rename(geohash = geohash.y) %>%
-  spread(ViolationCode, cnt) 
-
-ds <- violations  %>% select(geohash, lat, lon) %>%
-  right_join(data_set, by="geohash") %>% 
-  group_by(geohash) %>% summarise(cnt = n()) %>%  
-  right_join(data_set, by="geohash") %>% 
-  mutate(feat1 = ifelse(is.na(cnt), 0, cnt)) %>% 
-  select(blighted, feat1) %>%
-  mutate(blighted = factor(blighted))
-
-inTraining <- createDataPartition(data_set$blighted, p=.75, list = FALSE)
-tr <-data_set[inTraining,]
-ts <- data_set[-inTraining,]
-
-
-```
+  mutate(dist = gcd.hf(lon.x, lat.x, lon.y, lat.y))
