@@ -1,10 +1,10 @@
 ---
-title: "Blight analysis"
+title: "Analysis of blight risk for Detroit area"
 author: "Paweł Stradowski"
-date: "31.03.2016"
+date: "May 2016"
 output: html_document
 ---
-```{r}
+```{r loader, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
 Sys.setlocale("LC_MESSAGES", "en_US.utf8")
 Sys.setlocale("LC_ALL", "en_US.utf8")
 #data_path <- '~/datasci_course_materials/capstone/blight/data/'
@@ -14,17 +14,32 @@ violations <- read.csv(paste0(data_path, "detroit-blight-violations.csv"))
 crime <- read.csv(paste0(data_path, "detroit-crime.csv"))
 demolitions <- read.delim(paste0(data_path, "detroit-demolition-permits.tsv"))
 load("boundary.RData")
+```
+
+# Introduction
+
+The aim of this analysis is to build a model, which will predict the risk of blight for certain building/geo coordinates located in Detroit.
+The model should take a location and give an answer about likelihood of blight.  
+The model takes as train input the events, which could have an impact on possible condemnment:
+
+* crimes
++ violations
++ calls to 311  
+
+This data will be used to train model, the labels for the models will come from data about demolition permits issued by City of Detroit.  
+Main part of the analysis is done in R, the data cleaning and enrichement was done using dplyr, visualisation was mostly based on ggplot and leaflet.
+
+```{r libs, echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
 library("dplyr")
 library("leaflet")
 library("tidyr")
-library("fuzzyjoin")
 library("magrittr")
 library("geohash")
+library("aspace")
+library("xgboost")
+library("ggmap")
 ```
-
-Addresses extraction from violations
-``` {r}
-
+```{r enrich, echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
 parse_addr <- function(df, col){
   df %>% 
     separate_(col, into=c("addr", "loc"), sep="\\(") %>%
@@ -35,27 +50,82 @@ parse_addr <- function(df, col){
  }
 
 enrich <- function(df) {
-  df %>% filter(lat<max(boundary$lat), 
-                    lat > min(boundary$lat), 
-                    lon > min(boundary$lon), 
-                    lon < max(boundary$lon)) %>%
-    mutate(geohash = gh_encode(lat, lon, 8)) %>%
+  df %>% 
+    mutate(geohash = gh_encode(lat, lon, 9)) %>%
     mutate(gh6 = substr(geohash, 1, 6),
-         gh7 = substr(geohash, 1, 7))
+         gh7 = substr(geohash, 1, 7),
+         coord = paste0(lat, lon)) 
+    
 }
 
-violations %<>% parse_addr("ViolationAddress") %>% 
-  enrich() 
-  
-crime %<>% rename(lat = LAT, lon = LON, addr = ADDRESS) %>% 
-  enrich() 
-  
+filter_outliers <- function(df, epsilon = 4) {
+  df %<>% filter(lat<max(boundary$lat), 
+                    lat > min(boundary$lat), 
+                    lon > min(boundary$lon), 
+                    lon < max(boundary$lon))
+  cleaned <- df %>% group_by(coord) %>%
+    summarise(acnt = n_distinct(addr)) %>%
+    filter(acnt <= epsilon) %>%
+    select(-acnt)
+  df %>% inner_join(cleaned, by = "coord")
+}
+
 demolitions %<>% parse_addr("site_location") %>% 
   enrich() 
 
-detroit.311 %<>% rename(lon = lng) %>%
+violations %<>% parse_addr("ViolationAddress") %>% 
   enrich()
+viol <-  violations %>% filter_outliers()
   
+crime %<>% rename(lat = LAT, lon = LON, addr = ADDRESS) %>% 
+  enrich()
+crm <-  crime %>% filter_outliers()
+
+detroit.311 %<>% rename(lon = lng) %>%
+  mutate(addr = gsub("Detroit.+", "", address)) %>%
+  enrich() 
+det.311 <- detroit.311 %>%  filter_outliers()
+```
+This assignment is heavily based on geospatial analysis, therefore I considered following tools to analyze spatial distance:
+* *dplyr with geohash* as quick and dirty solution for joining data based on its spatial attributes
++ *[tile38](https://github.com/tidwall/tile38)* - specialized geolocation datastore which would allow for more precise joins
+This analysis covers only geohash usage, in case of further development, I strongly recommend to check also more precise solution based on tile38 or similar datastore.
+
+# Data Quality
+
+In project materials, there is no information about gathering process of the input data. This makes quality analysis very difficult, because we can find data which is bad, but have no tools to understand the root cause of the problem and correct the problem in a smart way. Instead we will throw out the data which looks troublesome.  
+The other issue with the input data is lack of positive labels. We only have records about demolition permits, which mean that we can for sure say that certain building was blighted, but we don't have opposite labels. This makes the whole analysis One Class Classification problem and we can describe it as PU Learning [^1] - we have only Positive set (demolition) and Unlabeled set (the rest), so it impacts the way, we design and train our model. As next step, I would definitely recommend review of available PU Learning approaches and evaluate them to find best one. For purpose of this document, I will focus on optimalisation for AUC as the main method to deal with One Class Classification problem.  
+Data files have different syntax - one needs to transform it to common format for latitude, longitude and addresses. In this step I also calculated geohashes.  
+The other issue with the data are outliers, I identified 2 classes of them:
+
+* location outside Detroit
++ multiple addresses assigned to a lat/lon pair - an example of top 5 lat/lon pairs from violatinos database
+
+[^1]: See: <https://en.wikipedia.org/wiki/One-class_classification>
+<http://www.machinedlearnings.com/2012/03/pu-learning-and-auc.html>
+``` {r, echo=FALSE}
+data <- violations %>% group_by(coord) %>%
+    summarise(address_count = n_distinct(addr)) %>% arrange(-address_count) %>% dplyr::slice(1:5)
+knitr::kable(data, caption = "Top 5 coordinates wit multiple addresses")
+```
+
+  
+The data was filtered to the area of Detroit using hand selected boundaries and all locations with more than 4 distinct addresses were rejected. This reducded the size of violations by `r nrow(violations)-nrow(viol)` rows and crimes by `r nrow(crime)-nrow(crm)` rows.  
+
+# Visualization and exploration
+
+Spatial distribution of all data is not uniform, there are some high-level clusters.
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
+det_map <- ggmap(get_map(location = c(-83.31717, 42.291342, -82.89610, 42.47767), source="osm"))
+det_map + 
+  scale_fill_continuous(low="orange", high="red") +
+  stat_density2d(aes(x = lon, y = lat, fill = ..level..), alpha = 0.2, size = 0.1, data = demolitions, geom = "polygon") + ggtitle("Density of demolition permits") 
+  
+det_map + scale_fill_continuous(low="orange", high="red") +
+  stat_density2d(aes(x = lon, y = lat, fill = ..level..), alpha = 0.2, size = 0.1, data = viol, geom = "polygon") + ggtitle("Density of violations")
+
+det_map + scale_fill_continuous(low="orange", high="red") +
+  stat_density2d(aes(x = lon, y = lat, fill = ..level..), alpha = 0.2, size = 0.1, data = crm, geom = "polygon") + ggtitle("Density of crimes")
 ```
 
 ```{r}
@@ -64,11 +134,11 @@ blight <-demolitions %>% distinct(geohash) %>%
   mutate(blighted = 1) 
 
 
-all_events <- crime %>% select(geohash, gh6, gh7, lat, lon) %>%
-  bind_rows(violations %>% select(geohash, gh6, gh7, lat, lon)) %>%
+all_events <- crm %>% select(geohash, gh6, gh7, lat, lon) %>%
+  bind_rows(viol %>% select(geohash, gh6, gh7, lat, lon)) %>%
   distinct(geohash) 
 
-non_blight <- anti_join(all_events, blight, by="gh7") %>%
+non_blight <- anti_join(all_events, blight, by="gh6") %>%
   select(geohash, gh6, gh7, lat, lon) %>%
   mutate(blighted = 0)
 
@@ -91,27 +161,53 @@ haversine <- function(lat1, lng1, lat2, lng2, miles=FALSE){
   if(miles==FALSE) return (h)
 }
 
-
-feat_viol <- violations  %>% select(geohash, gh6, gh7, lat, lon, ViolationCode) %>%
-  inner_join(data_set, by="gh7") %>%
+featurise <- function(df, radius, precision, spread_col){
+  df %>% select_("geohash", "gh6", "gh7", "lat", "lon", spread_col) %>%
+  inner_join(data_set, by = precision) %>%
   mutate(dist = haversine(lat.x, lon.x, lat.y, lon.y)) %>%
-  filter(dist < 0.1) %>%
-  group_by(geohash.y, ViolationCode) %>% 
+  filter(dist < radius) %>%
+  group_by_("geohash.y", spread_col) %>% 
   summarise(cnt = n()) %>%
   rename(geohash = geohash.y) %>%
-  spread(ViolationCode, cnt) 
+  spread_(spread_col, "cnt", fill = 0)   
+}
 
-ds <- violations  %>% select(geohash, lat, lon) %>%
-  right_join(data_set, by="geohash") %>% 
-  group_by(geohash) %>% summarise(cnt = n()) %>%  
-  right_join(data_set, by="geohash") %>% 
-  mutate(feat1 = ifelse(is.na(cnt), 0, cnt)) %>% 
-  select(blighted, feat1) %>%
-  mutate(blighted = factor(blighted))
+glue_it <- function(...){
+  tables <- list(...)
+  out_table <- data_set
+  for (i in tables ) {
+    out_table %<>% left_join(i, by = "geohash")
+  }
+  out_table %<>% replace(is.na(.), 0)
+  tr <- out_table %>% 
+    select(-lat, -lon, -geohash, -gh7, -gh6, -blighted) %>%
+    as.matrix()
+lb <- out_table %>%
+        select(blighted) %>%
+        as.matrix()
+xgb.DMatrix(tr, label=lb)
+}
 
-inTraining <- createDataPartition(data_set$blighted, p=.75, list = FALSE)
-tr <-data_set[inTraining,]
-ts <- data_set[-inTraining,]
+feat_viol <- featurise(viol, 3, "gh7", "ViolationCode")
+feat_crime <- crm %>% filter(!is.na(STATEOFFENSEFILECLASS)) %>%
+  featurise(3, "gh7", "STATEOFFENSEFILECLASS")
 
+xgb_tr <- glue_it(feat_viol, feat_crime)
+model_cv <- xgb.cv(data = xgb_tr, objective = "binary:logistic", 
+                   eval_metric = "auc",
+                     nfold=5, nrounds=100, max_depth=15, eta=0.8,
+                     gamma=1, colsample_bytree=0.8,
+                     subsample=0.75, min_child_weight=2)
+
+ 
+  
+
+# m9 <- xgboost(data=xgb_tr, label=lb, nrounds = 100, eta=8/100, 
+#               max_depth=15, eta=0.8,
+#                      gamma=1, colsample_bytree=0.8,
+#                      subsample=0.75, min_child_weight=2,
+#               objective = "binary:logistic")
+# 
+# importance <- xgb.importance(feature_names=dimnames(tr)[[2]], model=m9)
 
 ```
