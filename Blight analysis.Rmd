@@ -3,6 +3,7 @@ title: "Analysis of blight risk for Detroit area"
 author: "Paweł Stradowski"
 date: "May 2016"
 output: html_document
+always_allow_html: yes
 ---
 ```{r loader, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
 Sys.setlocale("LC_MESSAGES", "en_US.utf8")
@@ -18,7 +19,7 @@ load("boundary.RData")
 
 # Introduction
 
-An interactive version of this document is available here <https://rpubs.com/pstradowski/blight>, I strongly recommend to use it, because of the leaflet components, which are non-interactive in the PDF version.  
+An interactive version of this document is available here <https://rpubs.com/pstradowski/blight>, I strongly recommend to use it, because of the leaflet components, which are not available in the PDF version.  
 
 
 This if final assignment from Coursera Data Science at Scale specialization.
@@ -30,7 +31,7 @@ The model takes as train input the events, which could have an impact on possibl
 + violations
 + calls to 311  
 
-This data will be used to train model, the labels for the models will come from data about demolition permits issued by City of Detroit.  
+Above data will be used to train model, the labels for the models will come from demolition permits issued by the City of Detroit.  
 Main part of the analysis is done in R, the data cleaning and enrichement was done using dplyr, visualisation was mostly based on ggplot and leaflet.  
 Full source code is available online at <https://github.com/pstradowski/blight> 
 
@@ -78,7 +79,9 @@ filter_outliers <- function(df, epsilon = 4) {
 }
 
 demolitions %<>% parse_addr("site_location") %>% 
-  enrich() 
+  enrich() %>%
+  filter(!is.na(lat)) %>%
+  filter_outliers()
 
 violations %<>% parse_addr("ViolationAddress") %>% 
   enrich()
@@ -109,7 +112,7 @@ The other issue with the data are outliers, I identified 2 classes of them:
 * location outside Detroit
 + multiple addresses assigned to a lat/lon pair - an example of top 5 lat/lon pairs from violatinos database
 
-[^1]: See: <https://en.wikipedia.org/wiki/One-class_classification>
+[^1]: See: <https://en.wikipedia.org/wiki/One-class_classification>, 
 <http://www.machinedlearnings.com/2012/03/pu-learning-and-auc.html>
 ``` {r, echo=FALSE}
 data <- violations %>% group_by(coord) %>%
@@ -122,7 +125,8 @@ The data was filtered to the area of Detroit using hand selected boundaries and 
 
 # Visualization and exploration
 
-Spatial distribution of all data is not uniform, there are some high-level clusters.
+Spatial distribution of all data is not uniform, there are some high-level clusters.  
+
 ```{r, echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
 det_map <- ggmap(get_map(location = c(-83.31717, 42.291342, -82.89610, 42.47767), source="osm"))
 
@@ -140,11 +144,11 @@ det_map +
 ```{r, echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
 leaflet(data = demolitions) %>%
   addTiles() %>% 
-  addMarkers(~lon, ~lat, clusterOptions = markerClusterOptions()) 
+  addMarkers(~lon, ~lat, clusterOptions = markerClusterOptions())
 
 ```
 
-```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=TRUE}
 blight <-demolitions %>% distinct(geohash) %>%
   select(geohash, gh6, gh7, lat, lon) %>%
   mutate(blighted = 1) 
@@ -197,7 +201,8 @@ model_cv <- xgb.cv(data = xgb_tr, objective = "binary:logistic",
                    eval_metric = "auc",
                      nfold=5, nrounds=50, max_depth=15, eta=0.8,
                      gamma=1, colsample_bytree=0.8,
-                     subsample=0.75, min_child_weight=2)
+                     subsample=0.75, min_child_weight=2, 
+                   verbose = FALSE)
 ```
 # Features
 Assignment 4 from the course assumed usage of 1 feature - number of violations associated with the building, in my opinion such feature is very basic and must be extended.  
@@ -206,12 +211,12 @@ The final features will consist of number of crime/violations for each category 
 This approach can be made more precise by using specialised software to join datafiles using kind of geospatial indexes i i.e tile38.
 
 # Model
-I used Extended Gradient Boost with initial set of parameters used in one of previous projects. In further phase, a hyperparameter could be done to ensure best results.  
+I used Extended Gradient Boost with initial set of parameters used in one of previous projects. In further phase, a hyperparameter tuning could be done to ensure best results.  
 Due to PU Learning problem, I decided to use AUC as the evaluation metric, however the PU Learning problem should be further analyzed in order to valiadate assumptions for my approach.  
 Test set consists of data from demolition files plus equal amount of locations taken from other sources but with different 6 char geohash. This gives us points which lies more than 600m from blighted homes. This can impact the model performance, so an alternative could be to add an additional feature measuring distance to the next blighted home.
 
 # Results and summary
 
-I made 5 fold cross validation and it finishes with AUC `r model_cv$test.auc.mean[100]` which looks very good.  
-In order to ensure that this result is good, one need to repeat the analysis without approximations caused by geohash and PU Learning problem.  
+I made 5 fold cross validation and it finishes with AUC `r model_cv$test.auc.mean[50]` which looks very good.  
+In order to ensure that this result is not biased, one need to repeat the analysis without approximations caused by geohash and PU Learning problem.  
 The AUC result strongly depends on selection of unknown points - it is recommended to switch to high-precision selection of points and features instead of geohashes and then add a feature or features  measuring distance to the next blighted house.
