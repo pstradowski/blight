@@ -1,3 +1,4 @@
 # Final assignment of the Coursera specialization Data Science at scale
 
-Blight Analysis.rmd 
+Blight analysis.rmd contains all code and resources needed to build the final report.
+Enjoy!
